@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Environment variables — NEVER commit
+.env
+.env.local
+.env.production
+
+# Vercel
+.vercel/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# MongoDB / data
+*.bson
+
+# Reports export (runtime files)
+/tmp/frc_reports/
+
+# OS
+.DS_Store
+Thumbs.db
