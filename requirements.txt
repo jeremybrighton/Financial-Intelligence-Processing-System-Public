@@ -1,6 +1,7 @@
-# Financial Intelligence Processing System — Python dependencies
-# Python 3.11
+# Financial Intelligence Processing System
+# Python 3.11 — all packages pinned with pre-built wheels
 
+# Web framework
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 
@@ -14,8 +15,9 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.1.3
 
-# Config / validation
+# Config / validation — versions with pre-built wheels for Python 3.11
 pydantic==2.7.1
+pydantic-core==2.18.2
 pydantic-settings==2.2.1
 email-validator==2.1.1
 python-dotenv==1.0.1
@@ -23,3 +25,7 @@ python-dotenv==1.0.1
 # Utilities
 python-multipart==0.0.9
 httpx==0.27.0
+
+# Required by uvicorn[standard]
+websockets==12.0
+httptools==0.6.1
