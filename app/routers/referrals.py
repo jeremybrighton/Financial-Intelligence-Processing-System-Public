@@ -8,7 +8,7 @@ PATCH  /api/v1/referrals/{referral_id}/status
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.dependencies import require_any_internal_role, require_case_write
-from app.schemas.referral import ReferralCreateRequest, ReferralStatusUpdate
+from app.schemas.referral import ReferralCreateRequest, ReferralStatusUpdate, REFERRAL_DESTINATIONS
 from app.services import referral_service
 
 log = logging.getLogger(__name__)
@@ -21,10 +21,13 @@ async def list_referrals(
     page_size: int = 20,
     frc_case_id: str = None,
     status: str = None,
-    referred_to: str = None,
+    destination_body: str = None,
+    case_type: str = None,
     current_user: dict = Depends(require_any_internal_role()),
 ):
-    result = await referral_service.list_referrals(page, page_size, frc_case_id, status, referred_to)
+    result = await referral_service.list_referrals(
+        page, page_size, frc_case_id, status, destination_body, case_type
+    )
     return {"success": True, "data": result}
 
 
@@ -61,3 +64,8 @@ async def update_status(
     if not ref:
         raise HTTPException(status_code=404, detail=f"Referral '{referral_id}' not found")
     return {"success": True, "data": ref}
+
+
+@router.get("/meta/destinations", summary="List all valid destination bodies")
+async def list_destinations(current_user: dict = Depends(require_any_internal_role())):
+    return {"success": True, "data": REFERRAL_DESTINATIONS}

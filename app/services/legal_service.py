@@ -1,13 +1,13 @@
 """
 FRC System — Legal Rules Service
 ===================================
-Manages the structured legal knowledge base.
-Derived from Acts and regulatory documents — not read from raw PDFs at runtime.
+Manages the structured POCAMLA / POTA legal knowledge base.
+Rules are stored as structured documents — no PDF reading at runtime.
 """
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from bson import ObjectId
 
@@ -24,28 +24,47 @@ from app.services.audit_service import extract_actor, log_action
 log = logging.getLogger(__name__)
 
 
+class ConflictError(Exception):
+    pass
+
+
+def _to_response(doc: dict) -> LegalRuleResponse:
+    d = serialize_doc(doc)
+    # Drop full_text and complex objects from list response
+    d.pop("full_text", None)
+    d.pop("trigger_condition", None)
+    d.pop("system_use", None)
+    return LegalRuleResponse(**d)
+
+
+def _to_detail(doc: dict) -> LegalRuleDetailResponse:
+    d = serialize_doc(doc)
+    return LegalRuleDetailResponse(**d)
+
+
 async def create_rule(body: LegalRuleCreateRequest, actor: dict) -> LegalRuleResponse:
     existing = await legal_rules_col().find_one({"rule_code": body.rule_code})
     if existing:
         raise ConflictError(f"Rule code '{body.rule_code}' already exists")
 
     now = datetime.now(timezone.utc)
-    doc = {
-        **body.model_dump(),
-        "is_active": True,
-        "created_at": now,
-        "updated_at": now,
-    }
+    data = body.model_dump()
+    # Serialize nested Pydantic objects
+    if data.get("trigger_condition") and hasattr(data["trigger_condition"], "model_dump"):
+        data["trigger_condition"] = data["trigger_condition"].model_dump()
+    if data.get("system_use") and hasattr(data["system_use"], "model_dump"):
+        data["system_use"] = data["system_use"].model_dump()
+
+    doc = {**data, "is_active": True, "created_at": now, "updated_at": now}
     result = await legal_rules_col().insert_one(doc)
     doc["_id"] = result.inserted_id
 
     uid, uemail, urole = extract_actor(actor)
     await log_action(
         "legal_rule_created", "legal", uid, uemail, urole,
-        str(result.inserted_id), {"rule_code": body.rule_code},
+        str(result.inserted_id), {"rule_code": body.rule_code, "case_type": body.case_type},
     )
-    d = serialize_doc(doc)
-    return LegalRuleResponse(**{k: v for k, v in d.items() if k != "full_text"})
+    return _to_response(doc)
 
 
 async def list_rules(
@@ -53,33 +72,41 @@ async def list_rules(
     page_size: int = 20,
     tag: Optional[str] = None,
     applicable_to: Optional[str] = None,
+    rule_type: Optional[str] = None,
+    case_type: Optional[str] = None,
     search: Optional[str] = None,
     active_only: bool = True,
 ) -> dict:
-    query: dict = {}
+    query: Dict[str, Any] = {}
     if active_only:
         query["is_active"] = True
     if tag:
         query["tags"] = tag
     if applicable_to:
         query["applicable_to"] = applicable_to
+    if rule_type:
+        query["rule_type"] = rule_type
+    if case_type:
+        query["case_type"] = case_type
     if search:
         query["$or"] = [
             {"title": {"$regex": search, "$options": "i"}},
             {"summary": {"$regex": search, "$options": "i"}},
             {"rule_code": {"$regex": search, "$options": "i"}},
+            {"act_name": {"$regex": search, "$options": "i"}},
         ]
 
     skip = (page - 1) * page_size
     total = await legal_rules_col().count_documents(query)
+    proj = {"full_text": 0, "trigger_condition": 0, "system_use": 0}
     cursor = (
         legal_rules_col()
-        .find(query, {"full_text": 0})
+        .find(query, proj)
         .sort("rule_code", 1)
         .skip(skip)
         .limit(page_size)
     )
-    items = [LegalRuleResponse(**serialize_doc(d)) async for d in cursor]
+    items = [_to_response(d) async for d in cursor]
     return {
         "rules": items,
         "total": total,
@@ -91,7 +118,7 @@ async def list_rules(
 
 async def get_rule(rule_code: str) -> Optional[LegalRuleDetailResponse]:
     doc = await legal_rules_col().find_one({"rule_code": rule_code})
-    return LegalRuleDetailResponse(**serialize_doc(doc)) if doc else None
+    return _to_detail(doc) if doc else None
 
 
 async def get_rule_by_id(rule_id: str) -> Optional[LegalRuleDetailResponse]:
@@ -99,7 +126,7 @@ async def get_rule_by_id(rule_id: str) -> Optional[LegalRuleDetailResponse]:
         doc = await legal_rules_col().find_one({"_id": ObjectId(rule_id)})
     except Exception:
         return None
-    return LegalRuleDetailResponse(**serialize_doc(doc)) if doc else None
+    return _to_detail(doc) if doc else None
 
 
 async def update_rule(
@@ -107,21 +134,16 @@ async def update_rule(
 ) -> Optional[LegalRuleResponse]:
     updates = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not updates:
-        return await get_rule(rule_code)
-    updates["updated_at"] = datetime.now(timezone.utc)
+        doc = await legal_rules_col().find_one({"rule_code": rule_code}, {"full_text": 0, "trigger_condition": 0, "system_use": 0})
+        return _to_response(doc) if doc else None
 
-    result = await legal_rules_col().update_one(
-        {"rule_code": rule_code}, {"$set": updates}
-    )
+    updates["updated_at"] = datetime.now(timezone.utc)
+    result = await legal_rules_col().update_one({"rule_code": rule_code}, {"$set": updates})
     if result.matched_count == 0:
         return None
 
     uid, uemail, urole = extract_actor(actor)
     await log_action("legal_rule_updated", "legal", uid, uemail, urole, rule_code)
 
-    doc = await legal_rules_col().find_one({"rule_code": rule_code}, {"full_text": 0})
-    return LegalRuleResponse(**serialize_doc(doc)) if doc else None
-
-
-class ConflictError(Exception):
-    pass
+    doc = await legal_rules_col().find_one({"rule_code": rule_code}, {"full_text": 0, "trigger_condition": 0, "system_use": 0})
+    return _to_response(doc) if doc else None

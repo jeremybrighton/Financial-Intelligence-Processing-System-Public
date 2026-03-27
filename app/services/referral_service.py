@@ -1,12 +1,13 @@
 """
 FRC System — Referral Service
 ================================
-Routes FRC cases to external agencies: DCI, KRA, CBK, EACC, NIS, etc.
+Tracks case referrals to external authorities.
+Destination bodies: DCI, KRA, CBK, EACC, NIS, ARA, ANTI_TERROR, EGMONT, FRC, etc.
 """
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from app.core.database import cases_col, referrals_col
 from app.schemas.common import serialize_doc
@@ -14,6 +15,7 @@ from app.schemas.referral import (
     ReferralCreateRequest,
     ReferralResponse,
     ReferralStatusUpdate,
+    REFERRAL_DESTINATIONS,
 )
 from app.services.audit_service import extract_actor, log_action
 
@@ -27,6 +29,14 @@ async def _next_referral_id() -> str:
 
 
 async def create_referral(body: ReferralCreateRequest, actor: dict) -> ReferralResponse:
+    # Validate destination
+    dest = body.destination_body.upper()
+    if dest not in REFERRAL_DESTINATIONS:
+        raise ValueError(
+            f"Invalid destination_body '{body.destination_body}'. "
+            f"Valid: {', '.join(REFERRAL_DESTINATIONS)}"
+        )
+
     case = await cases_col().find_one({"frc_case_id": body.frc_case_id})
     if not case:
         raise ValueError(f"Case '{body.frc_case_id}' not found")
@@ -35,14 +45,17 @@ async def create_referral(body: ReferralCreateRequest, actor: dict) -> ReferralR
     now = datetime.now(timezone.utc)
     uid, uemail, urole = extract_actor(actor)
 
-    doc = {
+    doc: Dict[str, Any] = {
         "referral_id": referral_id,
         "frc_case_id": body.frc_case_id,
         "institution_id": case.get("institution_id", ""),
-        "referred_to": body.referred_to,
+        "destination_body": dest,
         "reason": body.reason,
+        "case_type": body.case_type,
+        "routing_policy": body.routing_policy,
         "status": "pending",
         "notes": body.notes,
+        "report_ids": body.report_ids,
         "referred_by": uid,
         "sent_at": None,
         "acknowledged_at": None,
@@ -53,20 +66,20 @@ async def create_referral(body: ReferralCreateRequest, actor: dict) -> ReferralR
     result = await referrals_col().insert_one(doc)
     doc["_id"] = result.inserted_id
 
-    # Update case status to referred
+    # Update case to referred status
     await cases_col().update_one(
         {"frc_case_id": body.frc_case_id},
-        {"$set": {
-            "status": "referred",
-            "referral_id": referral_id,
-            "updated_at": now,
-        }},
+        {"$set": {"status": "referred", "referral_id": referral_id, "updated_at": now}},
     )
 
     await log_action(
         "referral_created", "referrals", uid, uemail, urole,
         referral_id,
-        {"frc_case_id": body.frc_case_id, "referred_to": body.referred_to},
+        {
+            "frc_case_id": body.frc_case_id,
+            "destination_body": dest,
+            "case_type": body.case_type,
+        },
     )
     return ReferralResponse(**serialize_doc(doc))
 
@@ -76,15 +89,18 @@ async def list_referrals(
     page_size: int = 20,
     frc_case_id: Optional[str] = None,
     status: Optional[str] = None,
-    referred_to: Optional[str] = None,
+    destination_body: Optional[str] = None,
+    case_type: Optional[str] = None,
 ) -> dict:
-    query: dict = {}
+    query: Dict[str, Any] = {}
     if frc_case_id:
         query["frc_case_id"] = frc_case_id
     if status:
         query["status"] = status
-    if referred_to:
-        query["referred_to"] = referred_to
+    if destination_body:
+        query["destination_body"] = destination_body.upper()
+    if case_type:
+        query["case_type"] = case_type
 
     skip = (page - 1) * page_size
     total = await referrals_col().count_documents(query)
@@ -112,7 +128,7 @@ async def update_status(
         return None
 
     now = datetime.now(timezone.utc)
-    updates: dict = {"status": body.status, "updated_at": now}
+    updates: Dict[str, Any] = {"status": body.status, "updated_at": now}
     if body.notes:
         updates["notes"] = body.notes
     if body.status == "sent":
@@ -127,7 +143,7 @@ async def update_status(
     uid, uemail, urole = extract_actor(actor)
     await log_action(
         "referral_status_updated", "referrals", uid, uemail, urole,
-        referral_id, {"status": body.status},
+        referral_id, {"status": body.status, "destination_body": doc.get("destination_body")},
     )
 
     updated = await referrals_col().find_one({"referral_id": referral_id})
