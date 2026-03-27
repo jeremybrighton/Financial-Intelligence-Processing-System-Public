@@ -12,7 +12,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int          # seconds
+    expires_in: int
     user_id: str
     full_name: str
     role: str
@@ -26,9 +26,14 @@ class UserCreateRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    full_name: Optional[str] = None
+    full_name: Optional[str] = Field(None, min_length=2, max_length=120)
     role: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=8, max_length=128)
 
 
 class UserResponse(BaseModel):

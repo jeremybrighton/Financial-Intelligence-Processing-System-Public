@@ -1,27 +1,28 @@
 """
 FRC System — Auth Service
 ===========================
-Business logic for login, user creation, and user lookup.
+Business logic for login, user creation, update, and lookup.
 """
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
 
 from app.core.database import users_col
-from app.core.security import (
-    create_access_token,
-    hash_password,
-    verify_password,
-)
+from app.core.security import create_access_token, hash_password, verify_password
 from app.core.config import settings
 from app.models.user import ROLES
-from app.schemas.auth import LoginRequest, TokenResponse, UserCreateRequest, UserResponse
+from app.schemas.auth import LoginRequest, TokenResponse, UserCreateRequest, UserResponse, UserUpdateRequest
 from app.schemas.common import serialize_doc
-from app.services.audit_service import log_action
+from app.services.audit_service import extract_actor, log_action
 
 log = logging.getLogger(__name__)
+
+
+class ConflictError(Exception):
+    pass
 
 
 async def login(body: LoginRequest, ip_address: Optional[str] = None) -> TokenResponse:
@@ -37,18 +38,14 @@ async def login(body: LoginRequest, ip_address: Optional[str] = None) -> TokenRe
     user_id = str(user["_id"])
     token = create_access_token({"sub": user_id, "email": user["email"], "role": user["role"]})
 
-    # Update last_login
     await users_col().update_one(
         {"_id": user["_id"]},
         {"$set": {"last_login": datetime.now(timezone.utc)}},
     )
 
     await log_action(
-        action="user_login",
-        module="auth",
-        user_id=user_id,
-        user_email=user["email"],
-        user_role=user["role"],
+        action="user_login", module="auth",
+        user_id=user_id, user_email=user["email"], user_role=user["role"],
         ip_address=ip_address,
     )
 
@@ -64,7 +61,7 @@ async def login(body: LoginRequest, ip_address: Optional[str] = None) -> TokenRe
 async def create_user(body: UserCreateRequest, created_by: Optional[dict] = None) -> UserResponse:
     """Create a new FRC platform user."""
     if body.role not in ROLES:
-        raise ValueError(f"Invalid role '{body.role}'. Valid roles: {ROLES}")
+        raise ValueError(f"Invalid role '{body.role}'. Valid: {ROLES}")
 
     existing = await users_col().find_one({"email": body.email.lower()})
     if existing:
@@ -85,8 +82,11 @@ async def create_user(body: UserCreateRequest, created_by: Optional[dict] = None
     doc["_id"] = result.inserted_id
 
     if created_by:
-        uid, uemail, urole = str(created_by.get("_id","")), created_by.get("email",""), created_by.get("role","")
-        await log_action("user_created", "auth", uid, uemail, urole, str(result.inserted_id), {"email": body.email, "role": body.role})
+        uid, uemail, urole = extract_actor(created_by)
+        await log_action(
+            "user_created", "auth", uid, uemail, urole,
+            str(result.inserted_id), {"email": body.email, "role": body.role},
+        )
 
     return UserResponse(**serialize_doc(doc))
 
@@ -104,7 +104,6 @@ async def list_users(page: int = 1, page_size: int = 20) -> dict:
     total = await users_col().count_documents({})
     cursor = users_col().find({}, {"password_hash": 0}).skip(skip).limit(page_size)
     users = [UserResponse(**serialize_doc(d)) async for d in cursor]
-    import math
     return {
         "users": users,
         "total": total,
@@ -112,6 +111,43 @@ async def list_users(page: int = 1, page_size: int = 20) -> dict:
         "page_size": page_size,
         "total_pages": max(1, math.ceil(total / page_size)),
     }
+
+
+async def update_user(user_id: str, body: UserUpdateRequest, actor: dict) -> Optional[UserResponse]:
+    updates = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if "role" in updates and updates["role"] not in ROLES:
+        raise ValueError(f"Invalid role: {updates['role']}")
+    if not updates:
+        return await get_user_by_id(user_id)
+
+    updates["updated_at"] = datetime.now(timezone.utc)
+    try:
+        result = await users_col().update_one({"_id": ObjectId(user_id)}, {"$set": updates})
+    except Exception:
+        return None
+    if result.matched_count == 0:
+        return None
+
+    uid, uemail, urole = extract_actor(actor)
+    await log_action("user_updated", "auth", uid, uemail, urole, user_id, {"fields": list(updates.keys())})
+    return await get_user_by_id(user_id)
+
+
+async def change_password(user_id: str, current_pw: str, new_pw: str, actor: dict) -> bool:
+    try:
+        user = await users_col().find_one({"_id": ObjectId(user_id)})
+    except Exception:
+        return False
+    if not user or not verify_password(current_pw, user.get("password_hash", "")):
+        raise ValueError("Current password is incorrect")
+
+    await users_col().update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"password_hash": hash_password(new_pw), "updated_at": datetime.now(timezone.utc)}},
+    )
+    uid, uemail, urole = extract_actor(actor)
+    await log_action("password_changed", "auth", uid, uemail, urole, user_id)
+    return True
 
 
 async def deactivate_user(user_id: str, actor: dict) -> bool:
@@ -123,11 +159,6 @@ async def deactivate_user(user_id: str, actor: dict) -> bool:
     except Exception:
         return False
     if result.matched_count:
-        uid, uemail, urole = str(actor.get("_id","")), actor.get("email",""), actor.get("role","")
+        uid, uemail, urole = extract_actor(actor)
         await log_action("user_deactivated", "auth", uid, uemail, urole, user_id)
     return result.matched_count > 0
-
-
-# Local import to avoid circular at module level
-class ConflictError(Exception):
-    pass

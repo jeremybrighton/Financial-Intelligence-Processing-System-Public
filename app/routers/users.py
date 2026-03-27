@@ -1,14 +1,16 @@
 """
-Users router (FRC admin manages FRC platform users).
+Users router.
 GET    /api/v1/users
 POST   /api/v1/users
 GET    /api/v1/users/{user_id}
-DELETE /api/v1/users/{user_id}   (deactivate — soft delete)
+PUT    /api/v1/users/{user_id}
+DELETE /api/v1/users/{user_id}
+POST   /api/v1/auth/change-password   (via auth router)
 """
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.dependencies import require_admin, require_admin_or_analyst
-from app.schemas.auth import UserCreateRequest, UserResponse
+from app.schemas.auth import UserCreateRequest, UserUpdateRequest
 from app.services import auth_service
 
 log = logging.getLogger(__name__)
@@ -50,7 +52,22 @@ async def get_user(
     return {"success": True, "data": user}
 
 
-@router.delete("/{user_id}", summary="Deactivate a user")
+@router.put("/{user_id}", summary="Update user details or role")
+async def update_user(
+    user_id: str,
+    body: UserUpdateRequest,
+    current_user: dict = Depends(require_admin()),
+):
+    try:
+        user = await auth_service.update_user(user_id, body, actor=current_user)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"success": True, "data": user}
+
+
+@router.delete("/{user_id}", summary="Deactivate a user (soft delete)")
 async def deactivate_user(
     user_id: str,
     current_user: dict = Depends(require_admin()),
