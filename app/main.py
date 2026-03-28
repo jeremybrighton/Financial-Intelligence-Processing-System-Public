@@ -24,6 +24,7 @@ from app.routers import (
     legal,
     referrals,
     reports,
+    setup,
     users,
 )
 
@@ -91,3 +92,4 @@ app.include_router(legal.router,        prefix=PREFIX)
 app.include_router(reports.router,      prefix=PREFIX)
 app.include_router(referrals.router,    prefix=PREFIX)
 app.include_router(audit.router,        prefix=PREFIX)
+app.include_router(setup.router,        prefix=PREFIX)
